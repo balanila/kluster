@@ -1,0 +1,13 @@
+apiVersion: gateway.nginx.org/v1alpha2
+kind: NginxProxy
+metadata:
+  name: ytd-proxy
+  namespace: ytd
+spec:
+  kubernetes:
+    service:
+      type: NodePort
+      externalTrafficPolicy: Cluster
+      nodePorts:
+        - port: 30080
+          listenerPort: 8080

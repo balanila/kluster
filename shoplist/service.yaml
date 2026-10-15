@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: shoplist
+  namespace: ytd
+spec:
+  type: ClusterIP
+  selector:
+    app: shoplist
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

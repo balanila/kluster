@@ -1,0 +1,21 @@
+name: ytd-edge
+
+services:
+  proxy:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8080:8080"
+    environment:
+      MINIKUBE_NODE: ${MINIKUBE_NODE:-ytd}
+      NGINX_ENVSUBST_FILTER: ^MINIKUBE_NODE$
+    volumes:
+      - ./docker-proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      minikube:
+        ipv4_address: ${MINIKUBE_PROXY_IP:-192.168.58.250}
+
+networks:
+  minikube:
+    external: true
+    name: ${MINIKUBE_NETWORK:-ytd-network}

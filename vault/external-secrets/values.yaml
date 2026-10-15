@@ -1,0 +1,12 @@
+installCRDs: true
+scopedNamespace: ytd
+scopedRBAC: true
+processClusterExternalSecret: false
+processClusterPushSecret: false
+processClusterStore: false
+processClusterGenerator: false
+processPushSecret: false
+rbac:
+  serviceAccountTokenCreate: false
+serviceAccount:
+  name: external-secrets
