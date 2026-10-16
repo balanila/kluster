@@ -1,2 +1,13 @@
 shoplist/secret.local.yaml
 vault/secrets
+
+# Terraform: local state, caches, plans and local inputs (both EKS stages).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+*.dump

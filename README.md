@@ -1,5 +1,11 @@
 # ytd.bakabuka.com в minikube
 
+Отдельный вариант развёртывания в AWS: [EKS через Terraform](eks/README.md).
+Он создаёт независимый кластер с двумя `t3.micro` (1 GiB RAM), ASG 2–4 ноды
+и отдельным Terraform-этапом для Cluster Autoscaler и небольшой PostgreSQL
+на постоянном EBS-диске. Там же описано будущее подключение домена с DNS/NS
+у внешнего провайдера.
+
 Манифесты требуют GatewayClass `nginx` и NGINX Gateway Fabric.
 В новом кластере сначала установи Gateway API CRD и контроллер.
 Создаётся отдельный namespace `ytd`, Gateway с HTTP listener на порту 8080,
@@ -12,6 +18,97 @@ HTTPRoute, Service и Deployment с одной репликой и одним к
 Так меняется только virtual host этих доменов на основном сервере.
 Примеры TLS ниже нужно создать и применить отдельно; текущие файлы проекта
 пока содержат только HTTP listener.
+
+## Подготовка: инструменты и значения для примеров
+
+Команды этого README рассчитаны на терминал macOS; блоки со скрытым
+вводом Secret — на zsh. Установка инструментов описана на страницах
+[Docker Desktop для Mac](https://docs.docker.com/desktop/setup/install/mac-install/),
+[minikube](https://minikube.sigs.k8s.io/docs/start/),
+[kubectl](https://kubernetes.io/docs/tasks/tools/),
+[Helm](https://helm.sh/docs/intro/install/) и [jq](https://jqlang.org/download/).
+Certbot потребуется только для соответствующего раздела TLS:
+[выбор способа установки](https://certbot.eff.org/instructions).
+После установки проверь доступность и версии:
+
+```sh
+docker version
+docker compose version
+minikube version
+kubectl version --client
+helm version --short
+jq --version
+```
+
+Версии Kubernetes, minikube и контроллеров ниже закреплены для этой
+инструкции. Наличие более новой версии инструмента само по себе не повод
+менять версии кластера и Helm chart.
+
+### IP MacBook, внешний IP и DNS-провайдер
+
+`MAC_IP` в примерах — локальный адрес MacBook, доступный домашнему nginx.
+Открой System Settings → Network → активное подключение → Details → TCP/IP
+и скопируй IPv4 Address. Из терминала сначала найди сетевой интерфейс:
+
+```sh
+networksetup -listallhardwareports
+ipconfig getifaddr en0
+```
+
+Во второй команде замени `en0` на Device нужного подключения из первой.
+`192.168.30.37` ниже — адрес из домашней схемы; если у MacBook другой IP,
+замени его во всех соответствующих upstream и проверках. В MikroTik
+WinBox/WebFig → IP → DHCP Server → Leases найди MacBook по этому IP/MAC
+и сделай lease статическим (Make Static), если адрес выдаётся DHCP.
+
+Внешний IPv4 домашней сети можно узнать с подключённого к ней MacBook
+без VPN:
+
+```sh
+curl -4 --fail --silent --show-error https://checkip.amazonaws.com
+dig +short NS bakabuka.com
+dig +short A ytd.bakabuka.com
+dig +short AAAA ytd.bakabuka.com
+```
+
+Ответ `curl` должен быть целью A-записи. Сравни его также с WAN-адресом
+в MikroTik → IP → Addresses: если WAN-адрес приватный/за CGNAT, одного
+dst-nat на MikroTik недостаточно, нужен доступный извне адрес от провайдера
+или отдельно настроенный туннель. Проверку входа делай из внешней сети,
+например мобильного Интернета, а не только из домашней LAN.
+
+Команда NS показывает авторитетные DNS-серверы. DNS-записи меняются в
+панели провайдера, который обслуживает эту зону, в разделе DNS records /
+управление DNS. Он может отличаться от регистратора домена. Найти его
+можно по делегированным NS в панели регистратора; если аккаунт зоны тебе
+не принадлежит, доступ/изменение записи предоставляет владелец зоны.
+Для A-записи `ytd.bakabuka.com` поле Name обычно `ytd`, Value — внешний
+IPv4. Некоторые панели требуют полное имя; ориентируйся на предпросмотр
+полного имени записи. Для wildcard поле Name — `*`, для корня зоны —
+`@` или пустое поле согласно панели. AAAA добавляй только при рабочем IPv6.
+
+### Имена профиля, сети Docker и контейнера ноды
+
+Для нового кластера `ytd`, `ytd-network` и подсеть выбираются командами
+ниже — их не требуется заранее получать у внешнего сервиса. Для уже
+существующего кластера найди фактические значения:
+
+```sh
+minikube profile list
+kubectl config get-contexts
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+docker network ls
+docker network inspect ytd-network --format '{{json .IPAM.Config}}'
+docker network inspect ytd-network --format '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{println}}{{end}}'
+```
+
+В `docker network inspect` подставь имя сети из `docker network ls`.
+Выбери сеть, к которой подключены контейнеры нужного профиля; их имена
+видны в последней команде. `MINIKUBE_NETWORK` — это имя сети,
+`MINIKUBE_NODE` — имя контейнера одной из нод, а не имя Pod приложения.
+`MINIKUBE_PROXY_IP` и `MINIKUBE_TLS_PROXY_IP` — выбранные свободные IPv4
+в подсети IPAM; сверь их со списком занятых адресов. Для текущей сети
+зарезервированы `.250` и `.251`, адреса нод `.2`–`.4` занимать нельзя.
 
 ## Кластер на MacBook
 
@@ -62,6 +159,14 @@ kubectl --context=ytd get gatewayclass nginx
 GatewayClass должен иметь `Accepted=True`. Chart также устанавливает CRD
 `NginxProxy`. Если контроллер уже установлен, проверь поддержку
 `gateway.nginx.org/v1alpha2` и наличие GatewayClass `nginx`.
+Проверка этих значений для существующего кластера:
+
+```sh
+helm --kube-context ytd list -A
+kubectl --context=ytd get gatewayclass
+kubectl --context=ytd get crd nginxproxies.gateway.nginx.org \
+  -o jsonpath='{range .spec.versions[*]}{.name}{" served="}{.served}{"\n"}{end}'
+```
 
 ## Применение
 
@@ -580,6 +685,17 @@ kubectl -n cert-manager logs deployment/cert-manager --tail=100
 ```
 
 Для production подставь соответствующие имена Issuer и Certificate.
+Найти имена ресурсов и реальный HTTP-01 token можно так:
+
+```sh
+kubectl --context=ytd -n ytd get issuer,certificate
+kubectl --context=ytd -n ytd get challenges \
+  -o custom-columns='NAME:.metadata.name,DOMAIN:.spec.dnsName,TOKEN:.spec.token'
+```
+
+Имя берётся из колонки NAME, domain/token — из одной строки активного
+Challenge для нужного домена. Эти значения существуют только во время
+проверки; произвольный token не подходит.
 В Challenge видны домен и token. Пока challenge активен, запрос
 `http://ytd.bakabuka.com/.well-known/acme-challenge/РЕАЛЬНЫЙ_TOKEN`
 из внешней сети должен вернуть ответ solver, а не HTML приложения или 404.
@@ -590,6 +706,66 @@ cert-manager также выполняет self-check изнутри класт�
 сети к публичному адресу MikroTik: может потребоваться hairpin NAT.
 Альтернатива — split DNS, направляющий домен внутри сети на домашний
 nginx:80, при сохранении публичной DNS-записи для Let's Encrypt.
+
+## Где найти email, файлы сертификата и настройки DNS API
+
+`admin@bakabuka.com` в примерах — заглушка. Подставь существующий почтовый
+ящик, к которому у тебя есть доступ; адрес не обязан совпадать с доменом
+сайта. Это контакт ACME-аккаунта, его не нужно получать в Kubernetes/AWS.
+
+`/ABS/PATH/fullchain.pem` и `/ABS/PATH/privkey.pem` — абсолютные пути
+к уже выданным сертификату и ключу на машине, где запускается команда.
+Для Certbot на домашнем сервере выполни:
+
+```sh
+sudo certbot certificates
+```
+
+Найди блок своего домена и скопируй значения `Certificate Path` и
+`Private Key Path`. Если сертификат ещё не выдан, сначала выполни раздел
+выдачи ниже. Если его обслуживает другой ACME-клиент, пути находятся
+в настройках этого клиента и в `ssl_certificate` / `ssl_certificate_key`
+действующего virtual host. Приватный ключ не нужно открывать или печатать.
+При запуске kubectl с MacBook файлы должны быть доступны именно MacBook;
+путь на домашнем сервере не становится локальным автоматически. Можно
+выполнить импорт с самого сервера при наличии нужного kubeconfig либо
+вместо копирования ключа выбрать отдельную выдачу cert-manager.
+
+Для nginx в Docker посмотри пути монтирования в его Compose-файле:
+путь внутри контейнера и путь на хосте могут различаться. `fullchain.pem`
+должен содержать сертификат и промежуточную цепочку, а не только сертификат
+сайта. Проверить домены SAN и срок без вывода приватного ключа:
+
+```sh
+openssl x509 -in /ABS/PATH/fullchain.pem -noout -dates -ext subjectAltName
+```
+
+`/etc/ssl/certs/ca-certificates.crt` в `proxy_ssl_trusted_certificate` —
+системный файл доверенных CA на машине/в контейнере домашнего nginx.
+На Debian/Ubuntu/Alpine проверь этот путь через `ls -l`; на RHEL-подобной
+системе проверь `/etc/pki/tls/certs/ca-bundle.crt`. Если файлов нет,
+установи пакет `ca-certificates` для ОС nginx и используй путь из пакета.
+`/PATH/ca.pem` для `curl --cacert` берётся у администратора собственной CA;
+это её публичный CA-сертификат, не приватный ключ сайта. Для production
+Let's Encrypt с актуальными системными CA этот аргумент обычно не нужен.
+
+Панель DNS-провайдера найди по NS, как описано в подготовке выше.
+Для ручного Certbot точные TXT name/value показывает сам Certbot
+в процессе выдачи; их не надо придумывать или брать из примера.
+Для автоматического DNS-01 API token создаётся у этого же провайдера
+в разделе API / Tokens с правами изменения нужной зоны. Zone ID/Account ID,
+если требуются solver, обычно находятся в Overview зоны/аккаунта.
+Точные названия прав и ключей Secret смотри в
+[инструкции solver своего провайдера](https://cert-manager.io/docs/configuration/acme/dns01/).
+Если нужен webhook, перейди к его инструкции из списка поддерживаемых
+провайдеров. Не все провайдеры поддерживают API. Без названия провайдера
+нельзя указать единую рабочую структуру Secret или конфигурацию solver.
+
+Для Certbot доступные установленные plugins показывает `sudo certbot plugins`.
+Нужный DNS-plugin выбирается в [инструкции Certbot](https://certbot.eff.org/instructions)
+для своего провайдера/ОС. Секретные API credentials передаются способом,
+предписанным этим plugin, и хранятся вне Git. Ручной DNS-01 не требует
+API-токена, но сам по себе не даёт автоматического продления.
 
 ## Откуда берутся сертификаты Let's Encrypt
 
@@ -666,6 +842,21 @@ Gateway: каждый HTTPS listener в кластере должен иметь
 ## Один virtual host bakabuka.conf для HTTP и HTTPS
 
 На основном сервере nginx уже принимает 80/443 и обслуживает другие сайты.
+Каталог для нового `bakabuka.conf` найди по подключённым файлам действующего
+nginx. Команда ниже показывает только пути файлов и директивы include:
+
+```sh
+sudo nginx -T 2>/dev/null | grep -E '^# configuration file|^[[:space:]]*include '
+```
+
+Для nginx в Docker сначала найди контейнер через
+`docker ps --format 'table {{.Names}}\t{{.Image}}'`, затем выполни
+`docker exec ИМЯ_КОНТЕЙНЕРА nginx -T` с тем же фильтром; путь на хосте
+определяется volume mapping в Compose домашнего nginx.
+Часто используется `/etc/nginx/conf.d/*.conf` или `sites-enabled/*`,
+но ориентируйся на фактический include внутри `http`, а не на предположение.
+Создай отдельный файл в этом include-каталоге; конфиги других сайтов
+заменять не нужно.
 Чтобы менять только домены `bakabuka.com` и `*.bakabuka.com`, используй
 обычный HTTP virtual host с двумя server-блоками, подключаемый внутри
 существующего `http`. Остальные virtual hosts и их порты остаются прежними.
@@ -1065,13 +1256,52 @@ ConfigMap `shoplist-config` и Secret `shoplist-credentials` через `envFrom
 каждый ключ становится переменной окружения контейнера. Оба ресурса
 должны находиться в том же namespace `ytd`, что и Deployment.
 
-В `shoplist/configmap.yaml` замени `EXAMPLE_CONFIG` на реальные имена
-и значения несекретных переменных приложения. В `shoplist/secret.example.yaml`
-`EXAMPLE_USERNAME` и `EXAMPLE_PASSWORD` — примеры, а не подтверждённые
-имена переменных shoplist. Замени их на имена, ожидаемые приложением.
+В `shoplist/configmap.yaml` уже перечислены несекретные настройки
+`POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_PORT`, `POSTGRES_SSLMODE`,
+`POSTGRES_SCHEMA` и `NODE_ENV`; заглушки `EXAMPLE_CONFIG` в файле нет.
+Проверь их значения для своего окружения. В `shoplist/secret.example.yaml`
+`EXAMPLE_USERNAME` и `EXAMPLE_PASSWORD` — заглушки ключей. Для подключения
+PostgreSQL используй ожидаемые приложением `POSTGRES_USER` и
+`POSTGRES_PASSWORD`; как и другие переменные, их контракт нужно сверять
+с документацией именно используемого образа shoplist.
 Можно добавить другие ключи: пароль БД, API-токен, параметры авторизации.
 Для строковых значений ConfigMap используй кавычки, в том числе для чисел
 и логических значений.
+
+### Где взять настройки и учётные данные PostgreSQL
+
+Для домашней БД `POSTGRES_HOST` — адрес сервера PostgreSQL в LAN;
+найди сервер по адресу/MAC в MikroTik DHCP leases или посмотри его сетевые
+настройки. `192.168.30.25` в текущем ConfigMap — адрес из домашней схемы.
+Порт снаружи контейнера/сервиса проверь в его Compose `ports`, настройках
+PostgreSQL или у администратора БД; по умолчанию PostgreSQL использует 5432.
+Имя БД, имя пользователя и разрешённую приложению схему возьми у владельца
+БД. Если у тебя уже есть доступ через psql, несекретные значения можно
+проверить в существующем подключении:
+
+```sql
+SELECT current_database(), current_user;
+SHOW port;
+SELECT schema_name FROM information_schema.schemata ORDER BY schema_name;
+```
+
+`SHOW port` показывает порт самого PostgreSQL; при Docker port mapping
+для `POSTGRES_PORT` нужен опубликованный порт хоста. Пароль не выводится
+этими запросами и не восстанавливается из PostgreSQL в открытом виде:
+его нужно получить из своего хранилища секретов/у администратора или
+согласованно заменить в БД и Secret. Требуемый режим SSL определяет
+конфигурация БД и доверенная CA; `disable` из домашнего примера не следует
+переносить на неизвестную внешнюю БД автоматически.
+
+Документация переменных и миграций берётся из README/документации релиза
+приложения у автора образа. Здесь исходного кода приложения нет. Если
+описания нет, запроси контракт у автора; имена переменных нельзя выводить
+из названия сервиса или угадывать. API-токен, если он действительно нужен
+приложению, создаётся в аккаунте соответствующего API в разделе
+Tokens/API keys, а не в Kubernetes.
+
+Для варианта EKS эти действия с домашней БД не нужны: адрес, БД,
+пользователь и Secret создаются по [инструкции EKS](eks/README.md).
 
 ### Secret без пароля в файле
 
@@ -1189,6 +1419,12 @@ kubectl -n ytd rollout status deployment/shoplist
 Эти креды передаются приложению; для скачивания образа из приватного
 registry нужен отдельный Secret типа `kubernetes.io/dockerconfigjson`
 и `spec.template.spec.imagePullSecrets`.
+Адрес registry и repository возьми из страницы нужного образа;
+логин и token с правом pull создаются в аккаунте этого registry
+(обычно Account/Security → Access tokens). Для текущих публичных образов
+такой Secret не требуется. Безопасные варианты передачи credentials
+описаны в [инструкции Kubernetes для private registry](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/);
+не подставляй реальные токены в примеры команд, попадающие в shell history.
 
 ## Логи pod и Deployment
 
@@ -1225,6 +1461,14 @@ kubectl -n ytd logs ИМЯ_ПОДА --previous --tail=100
 ```
 
 Если в pod несколько контейнеров, укажи `-c ИМЯ_КОНТЕЙНЕРА`.
+Имена контейнеров выбранного Pod можно получить без вывода его env/Secret:
+
+```sh
+kubectl --context=ytd -n ytd get pod ИМЯ_ПОДА \
+  -o jsonpath='{.spec.containers[*].name}{"\n"}'
+```
+
+`ИМЯ_ПОДА` — значение колонки NAME в `kubectl --context=ytd -n ytd get pods`.
 Когда контейнер вообще не запускается, проверь события pod:
 
 ```sh

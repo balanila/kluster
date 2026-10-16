@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Только приложения: namespace, PostgreSQL и Secrets создаёт Terraform.
+# Gateway/NGF и внешний LoadBalancer настраиваются отдельно для EKS.
+resources:
+  - ../../ytd
+  - ../../shoplist
+  - shoplist-config.yaml
